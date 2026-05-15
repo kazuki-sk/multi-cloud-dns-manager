@@ -1,0 +1,22 @@
+[package]
+name    = "dns-manager-api"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dns-manager-api"
+path = "src/main.rs"
+
+[dependencies]
+anyhow              = { workspace = true }
+axum                = { workspace = true }
+chrono              = { workspace = true }
+dns-manager-core    = { workspace = true }
+dns-manager-db      = { workspace = true }
+serde               = { workspace = true }
+thiserror           = { workspace = true }
+tokio               = { workspace = true }
+tower-http          = { workspace = true }
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }
+uuid                = { workspace = true }

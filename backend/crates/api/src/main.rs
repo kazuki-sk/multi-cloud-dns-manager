@@ -1,0 +1,157 @@
+mod error;
+mod routes;
+
+use std::{net::SocketAddr, sync::Arc};
+
+use axum::{
+    extract::FromRef,
+    routing::{get, patch, post},
+    Router,
+};
+use dns_manager_db::DbPool;
+use tower_http::{
+    cors::{Any, CorsLayer},
+    trace::TraceLayer,
+};
+
+use routes::{changesets, health, providers, zones};
+
+// ── application state ─────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub struct AppState {
+    pub db: Arc<DbPool>,
+}
+
+impl FromRef<AppState> for Arc<DbPool> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.db)
+    }
+}
+
+// ── router ────────────────────────────────────────────────────────────────────
+
+fn build_router(state: AppState, cors: CorsLayer) -> Router {
+    let zones_routes = Router::new()
+        .route("/", get(zones::list_zones).post(zones::create_zone))
+        .route(
+            "/:zone_id",
+            get(zones::get_zone)
+                .patch(zones::update_zone)
+                .delete(zones::delete_zone),
+        )
+        .route(
+            "/:zone_id/records",
+            get(zones::list_records).post(zones::create_record),
+        )
+        .route(
+            "/:zone_id/records/:record_id",
+            patch(zones::update_record).delete(zones::delete_record),
+        );
+
+    let changesets_routes = Router::new()
+        .route(
+            "/",
+            get(changesets::list_changesets).post(changesets::create_changeset),
+        )
+        .route("/:changeset_id", get(changesets::get_changeset))
+        .route(
+            "/:changeset_id/validate",
+            post(changesets::validate_changeset),
+        )
+        .route("/:changeset_id/apply", post(changesets::apply_changeset))
+        .route(
+            "/:changeset_id/rollback",
+            post(changesets::rollback_changeset),
+        );
+
+    let providers_routes = Router::new()
+        .route(
+            "/",
+            get(providers::list_providers).post(providers::create_provider),
+        )
+        .route(
+            "/:provider_id",
+            get(providers::get_provider)
+                .patch(providers::update_provider)
+                .delete(providers::delete_provider),
+        )
+        .route("/:provider_id/sync-state", get(providers::get_sync_state));
+
+    Router::new()
+        .route("/health", get(health::get_health))
+        .nest("/api/v1/zones", zones_routes)
+        .nest("/api/v1/changesets", changesets_routes)
+        .nest("/api/v1/providers", providers_routes)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+// ── CORS ──────────────────────────────────────────────────────────────────────
+
+fn build_cors() -> CorsLayer {
+    // In development (no APP_ENV or APP_ENV != "production"), allow all origins.
+    // In production, tighten this to the actual frontend origin.
+    let env = std::env::var("APP_ENV").unwrap_or_default();
+    if env == "production" {
+        // Placeholder: callers must set CORS_ALLOWED_ORIGIN in production.
+        let origin = std::env::var("CORS_ALLOWED_ORIGIN")
+            .expect("CORS_ALLOWED_ORIGIN must be set when APP_ENV=production");
+        CorsLayer::new()
+            .allow_origin(
+                origin
+                    .parse::<axum::http::HeaderValue>()
+                    .expect("CORS_ALLOWED_ORIGIN is not a valid header value"),
+            )
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    } else {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    }
+}
+
+// ── startup ───────────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Initialise tracing so tower-http's TraceLayer has somewhere to write.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "dns_manager_api=debug,tower_http=debug".into()),
+        )
+        .init();
+
+    // ── database ──────────────────────────────────────────────────────────────
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:dns_manager.db".to_string());
+
+    tracing::info!(%database_url, "connecting to database");
+    let pool = dns_manager_db::connect(&database_url).await?;
+
+    tracing::info!("running migrations");
+    dns_manager_db::migrate(&pool).await?;
+
+    let state = AppState {
+        db: Arc::new(pool),
+    };
+
+    // ── server ────────────────────────────────────────────────────────────────
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8080);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    let app = build_router(state, build_cors());
+
+    tracing::info!(%addr, "listening");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
