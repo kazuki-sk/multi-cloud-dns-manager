@@ -1,14 +1,19 @@
 mod error;
 mod routes;
 
-use std::{collections::HashSet, net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+};
 
 use axum::{
     extract::FromRef,
     routing::{get, patch, post},
     Router,
 };
-use dns_manager_core::{EnvKeyProvider, KeyProvider};
+use dns_manager_adapter_route53::Route53Adapter;
+use dns_manager_core::{EnvKeyProvider, KeyProvider, ProviderAdapter};
 use dns_manager_db::DbPool;
 use dns_manager_worker::ReconcileWorker;
 use tower_http::{
@@ -43,6 +48,11 @@ impl FromRef<AppState> for HashSet<String> {
     fn from_ref(state: &AppState) -> Self {
         state.registered_providers.clone()
     }
+}
+
+fn build_adapter_registry() -> HashMap<String, Arc<dyn ProviderAdapter>> {
+    let route53: Arc<dyn ProviderAdapter> = Arc::new(Route53Adapter::new());
+    HashMap::from([(route53.provider_id().to_string(), route53)])
 }
 
 // ── router ────────────────────────────────────────────────────────────────────
@@ -181,8 +191,8 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("MASTER_KEY configuration error: {e}"))?;
     let key_provider: Arc<dyn KeyProvider> = Arc::new(EnvKeyProvider);
 
-    let registered_providers: HashSet<String> =
-        ["route53", "azuredns", "gcloud"].iter().map(|s| s.to_string()).collect();
+    let adapters = build_adapter_registry();
+    let registered_providers: HashSet<String> = adapters.keys().cloned().collect();
 
     let state = AppState {
         db: Arc::new(pool),
@@ -193,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
     // ── reconcile worker ─────────────────────────────────────────────────────
     let worker = std::sync::Arc::new(ReconcileWorker::new(
         Arc::clone(&state.db),
-        std::collections::HashMap::new(),
+        adapters,
         Arc::clone(&state.key_provider),
     ));
     tokio::spawn(async move { worker.run().await });

@@ -781,6 +781,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "dns-manager-adapter-route53",
  "dns-manager-core",
  "dns-manager-db",
  "dns-manager-worker",
