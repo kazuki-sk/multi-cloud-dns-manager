@@ -1,0 +1,9 @@
+[package]
+name    = "dns-manager-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }

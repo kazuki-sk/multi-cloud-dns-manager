@@ -1,0 +1,11 @@
+[package]
+name    = "dns-manager-adapter-route53"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait          = { workspace = true }
+aws-credential-types = "1"
+aws-sdk-route53      = "1"
+dns-manager-core     = { workspace = true }
+thiserror            = { workspace = true }

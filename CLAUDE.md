@@ -12,5 +12,27 @@
 - DBには平文credentialを保存しない（Envelope Encryption）
 
 # ディレクトリ構成
-（決まったら書く）
+.
+├── CLAUDE.md
+├── backend
+│   ├── Cargo.lock
+│   ├── Cargo.toml
+│   └── crates
+│       ├── adapters
+│       │   ├── azuredns
+│       │   ├── gcloud
+│       │   └── route53
+│       ├── api
+│       ├── core
+│       │   ├── Cargo.toml
+│       │   └── src
+│       │       ├── changeset.rs
+│       │       ├── lib.rs
+│       │       ├── provider.rs
+│       │       └── record.rs
+│       ├── db
+│       └── worker
+├── docs
+│   └── design.md
+└── frontend
 
