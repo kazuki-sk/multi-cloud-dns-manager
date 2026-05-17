@@ -50,17 +50,11 @@ pub struct ValidationResult {
 
 impl ValidationResult {
     pub fn ok() -> Self {
-        Self {
-            valid: true,
-            errors: vec![],
-        }
+        Self { valid: true, errors: vec![] }
     }
 
     pub fn err(errors: Vec<String>) -> Self {
-        Self {
-            valid: false,
-            errors,
-        }
+        Self { valid: false, errors }
     }
 }
 

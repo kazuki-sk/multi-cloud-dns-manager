@@ -46,17 +46,13 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
-            ApiError::Conflict => (
-                StatusCode::CONFLICT,
-                "conflict: resource already exists".to_string(),
-            ),
+            ApiError::Conflict => (StatusCode::CONFLICT, "conflict: resource already exists".to_string()),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             ApiError::UnprocessableEntity(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             // Never expose internal details; the real error is logged in From<db::Error>.
-            ApiError::Internal(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal server error".to_string(),
-            ),
+            ApiError::Internal(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
+            }
         };
         (status, Json(ErrorBody { error: message })).into_response()
     }
