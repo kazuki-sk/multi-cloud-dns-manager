@@ -10,6 +10,12 @@ pub enum ApiError {
     #[error("not found")]
     NotFound,
 
+    #[error("conflict")]
+    Conflict,
+
+    #[error("{0}")]
+    UnprocessableEntity(String),
+
     #[error("internal server error")]
     Internal(String),
 }
@@ -28,8 +34,10 @@ struct ErrorBody {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
+        let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            ApiError::Conflict => (StatusCode::CONFLICT, "conflict: resource already exists".to_string()),
+            ApiError::UnprocessableEntity(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             // Never expose internal details; the real error is logged in From<db::Error>.
             ApiError::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
