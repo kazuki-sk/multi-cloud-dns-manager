@@ -12,8 +12,12 @@ anyhow              = { workspace = true }
 axum                = { workspace = true }
 chrono              = { workspace = true }
 dns-manager-core    = { workspace = true }
+dns-manager-adapter-route53 = { path = "../adapters/route53" }
 dns-manager-db      = { workspace = true }
+dns-manager-worker  = { workspace = true }
 serde               = { workspace = true }
+serde_json          = { workspace = true }
+sha2                = { workspace = true }
 sqlx                = { workspace = true }
 thiserror           = { workspace = true }
 tokio               = { workspace = true }
@@ -21,3 +25,6 @@ tower-http          = { workspace = true }
 tracing             = { workspace = true }
 tracing-subscriber  = { workspace = true }
 uuid                = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -1,14 +1,21 @@
 mod error;
 mod routes;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    sync::Arc,
+};
 
 use axum::{
     extract::FromRef,
     routing::{get, patch, post},
     Router,
 };
+use dns_manager_adapter_route53::Route53Adapter;
+use dns_manager_core::{EnvKeyProvider, KeyProvider, ProviderAdapter};
 use dns_manager_db::DbPool;
+use dns_manager_worker::ReconcileWorker;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
@@ -21,12 +28,31 @@ use routes::{changesets, health, providers, zones};
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<DbPool>,
+    pub key_provider: Arc<dyn KeyProvider>,
+    pub registered_providers: HashSet<String>,
 }
 
 impl FromRef<AppState> for Arc<DbPool> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.db)
     }
+}
+
+impl FromRef<AppState> for Arc<dyn KeyProvider> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.key_provider)
+    }
+}
+
+impl FromRef<AppState> for HashSet<String> {
+    fn from_ref(state: &AppState) -> Self {
+        state.registered_providers.clone()
+    }
+}
+
+fn build_adapter_registry() -> HashMap<String, Arc<dyn ProviderAdapter>> {
+    let route53: Arc<dyn ProviderAdapter> = Arc::new(Route53Adapter::new());
+    HashMap::from([(route53.provider_id().to_string(), route53)])
 }
 
 // ── router ────────────────────────────────────────────────────────────────────
@@ -90,27 +116,27 @@ fn build_router(state: AppState, cors: CorsLayer) -> Router {
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 
-fn build_cors() -> CorsLayer {
+fn build_cors() -> anyhow::Result<CorsLayer> {
     // In development (no APP_ENV or APP_ENV != "production"), allow all origins.
     // In production, tighten this to the actual frontend origin.
     let env = std::env::var("APP_ENV").unwrap_or_default();
     if env == "production" {
         // Placeholder: callers must set CORS_ALLOWED_ORIGIN in production.
-        let origin = std::env::var("CORS_ALLOWED_ORIGIN")
-            .expect("CORS_ALLOWED_ORIGIN must be set when APP_ENV=production");
-        CorsLayer::new()
-            .allow_origin(
-                origin
-                    .parse::<axum::http::HeaderValue>()
-                    .expect("CORS_ALLOWED_ORIGIN is not a valid header value"),
-            )
+        let origin = std::env::var("CORS_ALLOWED_ORIGIN").map_err(|_| {
+            anyhow::anyhow!("CORS_ALLOWED_ORIGIN must be set when APP_ENV=production")
+        })?;
+        let origin = origin
+            .parse::<axum::http::HeaderValue>()
+            .map_err(|_| anyhow::anyhow!("CORS_ALLOWED_ORIGIN is not a valid header value"))?;
+        Ok(CorsLayer::new()
+            .allow_origin(origin)
             .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any))
     } else {
-        CorsLayer::new()
+        Ok(CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_headers(Any))
     }
 }
 
@@ -157,9 +183,30 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("running migrations");
     dns_manager_db::migrate(&pool).await?;
 
+    // Validate MASTER_KEY before accepting any requests.
+    // Returns an error (not a panic) so the process exits with a non-zero code
+    // and a descriptive message.
+    EnvKeyProvider
+        .get_kek()
+        .map_err(|e| anyhow::anyhow!("MASTER_KEY configuration error: {e}"))?;
+    let key_provider: Arc<dyn KeyProvider> = Arc::new(EnvKeyProvider);
+
+    let adapters = build_adapter_registry();
+    let registered_providers: HashSet<String> = adapters.keys().cloned().collect();
+
     let state = AppState {
         db: Arc::new(pool),
+        key_provider,
+        registered_providers,
     };
+
+    // ── reconcile worker ─────────────────────────────────────────────────────
+    let worker = std::sync::Arc::new(ReconcileWorker::new(
+        Arc::clone(&state.db),
+        adapters,
+        Arc::clone(&state.key_provider),
+    ));
+    tokio::spawn(async move { worker.run().await });
 
     // ── server ────────────────────────────────────────────────────────────────
     let port: u16 = std::env::var("PORT")
@@ -168,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let app = build_router(state, build_cors());
+    let app = build_router(state, build_cors()?);
 
     tracing::info!(%addr, "listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
