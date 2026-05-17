@@ -6,6 +6,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -29,6 +30,16 @@ struct ListZonesResponse {
     zones: Vec<Zone>,
 }
 
+#[derive(FromRow)]
+struct ZoneRow {
+    id: String,
+    name: String,
+    default_ttl: i64,
+    owner_team_id: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
 // ── request types ─────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -48,7 +59,7 @@ fn default_ttl() -> i64 {
 pub async fn list_zones(
     State(pool): State<Arc<DbPool>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as::<_, ZoneRow>(
         "SELECT id, name, default_ttl, owner_team_id, created_at, updated_at
          FROM zones
          ORDER BY name"
@@ -96,15 +107,15 @@ pub async fn create_zone(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
 
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO zones (id, name, default_ttl, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)",
-        id,
-        body.name,
-        body.default_ttl,
-        now,
-        now,
+         VALUES (?, ?, ?, ?, ?)"
     )
+    .bind(&id)
+    .bind(&body.name)
+    .bind(body.default_ttl)
+    .bind(&now)
+    .bind(&now)
     .execute(&*pool)
     .await
     .map_err(|e| {
@@ -117,12 +128,12 @@ pub async fn create_zone(
     })?;
 
     // ── fetch created row ─────────────────────────────────────────────────────
-    let row = sqlx::query!(
+    let row = sqlx::query_as::<_, ZoneRow>(
         "SELECT id, name, default_ttl, owner_team_id, created_at, updated_at
          FROM zones
-         WHERE id = ?",
-        id,
+         WHERE id = ?"
     )
+    .bind(&id)
     .fetch_one(&*pool)
     .await
     .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;

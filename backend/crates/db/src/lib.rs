@@ -1,9 +1,6 @@
-use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
-use std::str::FromStr;
+use sqlx::{pool::PoolOptions, Any, AnyPool};
 
-/// Concrete pool type.  SQLite is the default backend; the type alias keeps
-/// the rest of the codebase decoupled from the driver module.
-pub type DbPool = SqlitePool;
+pub type DbPool = AnyPool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -13,16 +10,29 @@ pub enum Error {
     Migrate(#[from] sqlx::migrate::MigrateError),
 }
 
-/// Create a connection pool for the given `DATABASE_URL`.
+/// Create a connection pool for the given DATABASE_URL.
 ///
-/// `PRAGMA foreign_keys = ON` is set via [`SqliteConnectOptions::pragma`] so
-/// every connection in the pool enforces FK constraints from the moment it is
-/// opened (SQLite disables this by default).
+/// Supported schemes: `sqlite:` and `postgres:` / `postgresql:`.
+/// For SQLite connections, `PRAGMA foreign_keys = ON` is automatically
+/// executed on every new connection so FK constraints are enforced at
+/// the storage layer (SQLite disables this by default).
 pub async fn connect(database_url: &str) -> Result<DbPool, Error> {
-    let opts = SqliteConnectOptions::from_str(database_url)?
-        .create_if_missing(true)
-        .pragma("foreign_keys", "ON");
-    Ok(SqlitePool::connect_with(opts).await?)
+    sqlx::any::install_default_drivers();
+    if database_url.starts_with("sqlite:") {
+        Ok(PoolOptions::<Any>::new()
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(database_url)
+            .await?)
+    } else {
+        Ok(AnyPool::connect(database_url).await?)
+    }
 }
 
 /// Run all pending migrations against the pool.
