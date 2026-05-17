@@ -46,18 +46,18 @@ CREATE INDEX idx_provider_bindings_zone_id ON provider_bindings (zone_id);
 -- ─── desired_records ──────────────────────────────────────────────────────────
 -- Desired state: what DNS records *should* exist (§5.2 Record).
 --
--- values       : JSON array of record value strings
---                MX example: ["10 mail.example.com.", "20 mail2.example.com."]
--- desired_hash : SHA-256 hex of (name + type + ttl + canonical values),
---                used for fast drift comparison in the Observe Phase.
--- deleted_at   : NULL → active record; non-NULL → tombstone (§3.6).
+-- record_values : JSON array of record value strings
+--                 MX example: ["10 mail.example.com.", "20 mail2.example.com."]
+-- desired_hash  : SHA-256 hex of (name + type + ttl + canonical record_values),
+--                 used for fast drift comparison in the Observe Phase.
+-- deleted_at    : NULL → active record; non-NULL → tombstone (§3.6).
 CREATE TABLE desired_records (
-    id           TEXT    NOT NULL PRIMARY KEY,
-    zone_id      TEXT    NOT NULL,
-    name         TEXT    NOT NULL,   -- relative name: "www", "@", "*"
-    record_type  TEXT    NOT NULL    -- MVP types + extension types (§7.1)
-                     CHECK (record_type IN ('A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'CAA')),
-    values       TEXT    NOT NULL,   -- JSON array
+    id            TEXT    NOT NULL PRIMARY KEY,
+    zone_id       TEXT    NOT NULL,
+    name          TEXT    NOT NULL,   -- relative name: "www", "@", "*"
+    record_type   TEXT    NOT NULL    -- MVP types + extension types (§7.1)
+                      CHECK (record_type IN ('A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'CAA')),
+    record_values TEXT    NOT NULL,   -- JSON array
     ttl          INTEGER NOT NULL,
     desired_hash TEXT    NOT NULL,
     deleted_at   TEXT,               -- NULL = active; set = tombstone

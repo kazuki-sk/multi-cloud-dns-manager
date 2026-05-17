@@ -35,17 +35,17 @@ fn build_router(state: AppState, cors: CorsLayer) -> Router {
     let zones_routes = Router::new()
         .route("/", get(zones::list_zones).post(zones::create_zone))
         .route(
-            "/:zone_id",
+            "/{zone_id}",
             get(zones::get_zone)
                 .patch(zones::update_zone)
                 .delete(zones::delete_zone),
         )
         .route(
-            "/:zone_id/records",
+            "/{zone_id}/records",
             get(zones::list_records).post(zones::create_record),
         )
         .route(
-            "/:zone_id/records/:record_id",
+            "/{zone_id}/records/{record_id}",
             patch(zones::update_record).delete(zones::delete_record),
         );
 
@@ -54,14 +54,14 @@ fn build_router(state: AppState, cors: CorsLayer) -> Router {
             "/",
             get(changesets::list_changesets).post(changesets::create_changeset),
         )
-        .route("/:changeset_id", get(changesets::get_changeset))
+        .route("/{changeset_id}", get(changesets::get_changeset))
         .route(
-            "/:changeset_id/validate",
+            "/{changeset_id}/validate",
             post(changesets::validate_changeset),
         )
-        .route("/:changeset_id/apply", post(changesets::apply_changeset))
+        .route("/{changeset_id}/apply", post(changesets::apply_changeset))
         .route(
-            "/:changeset_id/rollback",
+            "/{changeset_id}/rollback",
             post(changesets::rollback_changeset),
         );
 
@@ -71,12 +71,12 @@ fn build_router(state: AppState, cors: CorsLayer) -> Router {
             get(providers::list_providers).post(providers::create_provider),
         )
         .route(
-            "/:provider_id",
+            "/{provider_id}",
             get(providers::get_provider)
                 .patch(providers::update_provider)
                 .delete(providers::delete_provider),
         )
-        .route("/:provider_id/sync-state", get(providers::get_sync_state));
+        .route("/{provider_id}/sync-state", get(providers::get_sync_state));
 
     Router::new()
         .route("/health", get(health::get_health))

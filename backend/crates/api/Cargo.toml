@@ -14,6 +14,7 @@ chrono              = { workspace = true }
 dns-manager-core    = { workspace = true }
 dns-manager-db      = { workspace = true }
 serde               = { workspace = true }
+sqlx                = { workspace = true }
 thiserror           = { workspace = true }
 tokio               = { workspace = true }
 tower-http          = { workspace = true }

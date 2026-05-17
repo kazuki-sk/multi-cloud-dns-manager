@@ -729,6 +729,7 @@ dependencies = [
  "dns-manager-core",
  "dns-manager-db",
  "serde",
+ "sqlx",
  "thiserror",
  "tokio",
  "tower-http",
