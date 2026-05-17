@@ -8,7 +8,9 @@ use axum::{
     routing::{get, patch, post},
     Router,
 };
+use dns_manager_core::{EnvKeyProvider, KeyProvider};
 use dns_manager_db::DbPool;
+use dns_manager_worker::ReconcileWorker;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
@@ -21,11 +23,18 @@ use routes::{changesets, health, providers, zones};
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<DbPool>,
+    pub key_provider: Arc<dyn KeyProvider>,
 }
 
 impl FromRef<AppState> for Arc<DbPool> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.db)
+    }
+}
+
+impl FromRef<AppState> for Arc<dyn KeyProvider> {
+    fn from_ref(state: &AppState) -> Self {
+        Arc::clone(&state.key_provider)
     }
 }
 
@@ -157,9 +166,26 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("running migrations");
     dns_manager_db::migrate(&pool).await?;
 
+    // Validate MASTER_KEY before accepting any requests.
+    // Returns an error (not a panic) so the process exits with a non-zero code
+    // and a descriptive message.
+    EnvKeyProvider
+        .get_kek()
+        .map_err(|e| anyhow::anyhow!("MASTER_KEY configuration error: {e}"))?;
+    let key_provider: Arc<dyn KeyProvider> = Arc::new(EnvKeyProvider);
+
     let state = AppState {
         db: Arc::new(pool),
+        key_provider,
     };
+
+    // ── reconcile worker ─────────────────────────────────────────────────────
+    let worker = std::sync::Arc::new(ReconcileWorker::new(
+        Arc::clone(&state.db),
+        std::collections::HashMap::new(),
+        Arc::clone(&state.key_provider),
+    ));
+    tokio::spawn(async move { worker.run().await });
 
     // ── server ────────────────────────────────────────────────────────────────
     let port: u16 = std::env::var("PORT")

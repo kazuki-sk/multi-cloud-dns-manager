@@ -13,7 +13,10 @@ axum                = { workspace = true }
 chrono              = { workspace = true }
 dns-manager-core    = { workspace = true }
 dns-manager-db      = { workspace = true }
+dns-manager-worker  = { workspace = true }
 serde               = { workspace = true }
+serde_json          = { workspace = true }
+sha2                = { workspace = true }
 sqlx                = { workspace = true }
 thiserror           = { workspace = true }
 tokio               = { workspace = true }
