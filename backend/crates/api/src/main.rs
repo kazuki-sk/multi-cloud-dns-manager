@@ -1,7 +1,7 @@
 mod error;
 mod routes;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{collections::HashSet, net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::FromRef,
@@ -24,6 +24,7 @@ use routes::{changesets, health, providers, zones};
 pub struct AppState {
     pub db: Arc<DbPool>,
     pub key_provider: Arc<dyn KeyProvider>,
+    pub registered_providers: HashSet<String>,
 }
 
 impl FromRef<AppState> for Arc<DbPool> {
@@ -35,6 +36,12 @@ impl FromRef<AppState> for Arc<DbPool> {
 impl FromRef<AppState> for Arc<dyn KeyProvider> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.key_provider)
+    }
+}
+
+impl FromRef<AppState> for HashSet<String> {
+    fn from_ref(state: &AppState) -> Self {
+        state.registered_providers.clone()
     }
 }
 
@@ -174,9 +181,13 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("MASTER_KEY configuration error: {e}"))?;
     let key_provider: Arc<dyn KeyProvider> = Arc::new(EnvKeyProvider);
 
+    let registered_providers: HashSet<String> =
+        ["route53", "azuredns", "gcloud"].iter().map(|s| s.to_string()).collect();
+
     let state = AppState {
         db: Arc::new(pool),
         key_provider,
+        registered_providers,
     };
 
     // ── reconcile worker ─────────────────────────────────────────────────────

@@ -865,10 +865,12 @@ fn parse_desired_record(row: &DesiredRecordRow) -> anyhow::Result<ProviderRecord
     // RecordType uses SCREAMING_SNAKE_CASE serde: wrap in quotes to deserialize.
     let record_type: RecordType = serde_json::from_str(&format!("\"{}\"", row.record_type))
         .map_err(|e| anyhow::anyhow!("record_type parse error '{}': {e}", row.record_type))?;
+    let ttl = u32::try_from(row.ttl)
+        .map_err(|e| anyhow::anyhow!("ttl conversion error for {}: {e}", row.id))?;
     Ok(ProviderRecord {
         name: row.name.clone(),
         record_type,
-        ttl: row.ttl as u32,
+        ttl,
         values,
     })
 }

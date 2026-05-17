@@ -190,7 +190,7 @@ pub async fn create_changeset(
 ) -> Result<impl IntoResponse, ApiError> {
     // ── validation ────────────────────────────────────────────────────────────
     if body.items.is_empty() {
-        return Err(ApiError::UnprocessableEntity("items must not be empty".into()));
+        return Err(ApiError::BadRequest("items must not be empty".into()));
     }
     let valid_ops = ["create", "update", "delete"];
     for item in &body.items {
@@ -337,6 +337,86 @@ pub async fn validate_changeset(
         .ok_or_else(|| ApiError::Internal("changeset disappeared after update".into()))?;
 
     Ok(Json(changeset))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use tower::ServiceExt;
+
+    async fn make_pool() -> Arc<DbPool> {
+        let opts = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        dns_manager_db::migrate(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    fn make_router(pool: Arc<DbPool>) -> Router {
+        Router::new()
+            .route("/changesets", post(create_changeset))
+            .route("/changesets/{id}/validate", post(validate_changeset))
+            .with_state(pool)
+    }
+
+    fn json_body(v: serde_json::Value) -> Body {
+        Body::from(serde_json::to_vec(&v).unwrap())
+    }
+
+    #[tokio::test]
+    async fn empty_items_returns_400() {
+        let pool = make_pool().await;
+        let app = make_router(pool);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/changesets")
+            .header("content-type", "application/json")
+            .body(json_body(serde_json::json!({ "items": [] })))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn invalid_state_transition_returns_400() {
+        let pool = make_pool().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        // Insert a changeset already in 'applying' state.
+        // validate_changeset attempts applying → validated, which is forbidden.
+        sqlx::query(
+            "INSERT INTO changesets
+             (id, created_by, description, status, rollback_policy, created_at, updated_at)
+             VALUES (?, 'test', NULL, 'applying', 'auto', ?, ?)",
+        )
+        .bind(&id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&*pool)
+        .await
+        .unwrap();
+
+        let app = make_router(Arc::clone(&pool));
+        let req = Request::builder()
+            .method("POST")
+            .uri(&format!("/changesets/{id}/validate"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 // ── stub handlers (not yet implemented) ──────────────────────────────────────

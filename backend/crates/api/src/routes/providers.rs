@@ -9,6 +9,7 @@ use dns_manager_core::{encrypt, KeyProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -91,6 +92,7 @@ pub struct CreateProviderRequest {
 pub async fn create_provider(
     State(pool): State<Arc<DbPool>>,
     State(key_provider): State<Arc<dyn KeyProvider>>,
+    State(registered_providers): State<HashSet<String>>,
     Json(body): Json<CreateProviderRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // ── validation ────────────────────────────────────────────────────────────
@@ -98,6 +100,18 @@ pub async fn create_provider(
         return Err(ApiError::UnprocessableEntity(
             "provider_type must not be empty".into(),
         ));
+    }
+    if !registered_providers.contains(&body.provider_type) {
+        return Err(ApiError::BadRequest(format!(
+            "unknown provider_type '{}': must be one of {:?}",
+            body.provider_type,
+            {
+                let mut sorted: Vec<&str> =
+                    registered_providers.iter().map(String::as_str).collect();
+                sorted.sort_unstable();
+                sorted
+            }
+        )));
     }
     if body.provider_zone_id.trim().is_empty() {
         return Err(ApiError::UnprocessableEntity(
@@ -216,6 +230,113 @@ pub async fn get_sync_state(
         .collect();
 
     Ok(Json(SyncStateListResponse { sync_states }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        extract::FromRef,
+        http::{Request, StatusCode},
+        routing::post,
+        Router,
+    };
+    use dns_manager_core::EnvKeyProvider;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use tower::ServiceExt;
+
+    #[derive(Clone)]
+    struct TestState {
+        pool: Arc<DbPool>,
+        key_provider: Arc<dyn KeyProvider>,
+        registered_providers: HashSet<String>,
+    }
+
+    impl FromRef<TestState> for Arc<DbPool> {
+        fn from_ref(s: &TestState) -> Self {
+            Arc::clone(&s.pool)
+        }
+    }
+
+    impl FromRef<TestState> for Arc<dyn KeyProvider> {
+        fn from_ref(s: &TestState) -> Self {
+            Arc::clone(&s.key_provider)
+        }
+    }
+
+    impl FromRef<TestState> for HashSet<String> {
+        fn from_ref(s: &TestState) -> Self {
+            s.registered_providers.clone()
+        }
+    }
+
+    async fn make_state() -> TestState {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let opts = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        dns_manager_db::migrate(&pool).await.unwrap();
+        TestState {
+            pool: Arc::new(pool),
+            key_provider: Arc::new(EnvKeyProvider),
+            registered_providers: ["route53", "azuredns", "gcloud"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        }
+    }
+
+    fn make_router(state: TestState) -> Router {
+        Router::new()
+            .route("/providers", post(create_provider))
+            .with_state(state)
+    }
+
+    fn json_body(v: serde_json::Value) -> Body {
+        Body::from(serde_json::to_vec(&v).unwrap())
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_type_returns_400() {
+        let app = make_router(make_state().await);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/providers")
+            .header("content-type", "application/json")
+            .body(json_body(serde_json::json!({
+                "zone_id": "z1",
+                "provider_type": "unknown",
+                "provider_zone_id": "Z123",
+                "credentials": {}
+            })))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn nonexistent_zone_id_returns_404() {
+        let app = make_router(make_state().await);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/providers")
+            .header("content-type", "application/json")
+            .body(json_body(serde_json::json!({
+                "zone_id": "does-not-exist",
+                "provider_type": "route53",
+                "provider_zone_id": "Z123",
+                "credentials": {}
+            })))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 // ── stub handlers (not yet implemented) ──────────────────────────────────────
