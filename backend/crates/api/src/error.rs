@@ -10,12 +10,13 @@ pub enum ApiError {
     #[error("not found")]
     NotFound,
 
-    #[error("internal error: {0}")]
+    #[error("internal server error")]
     Internal(String),
 }
 
 impl From<dns_manager_db::Error> for ApiError {
     fn from(e: dns_manager_db::Error) -> Self {
+        tracing::error!(error = %e, "database error");
         ApiError::Internal(e.to_string())
     }
 }
@@ -27,13 +28,13 @@ struct ErrorBody {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = match &self {
-            ApiError::NotFound => StatusCode::NOT_FOUND,
-            ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, message) = match &self {
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
+            // Never expose internal details; the real error is logged in From<db::Error>.
+            ApiError::Internal(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string())
+            }
         };
-        let body = Json(ErrorBody {
-            error: self.to_string(),
-        });
-        (status, body).into_response()
+        (status, Json(ErrorBody { error: message })).into_response()
     }
 }

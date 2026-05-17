@@ -1,4 +1,4 @@
-use sqlx::AnyPool;
+use sqlx::{pool::PoolOptions, Any, AnyPool};
 
 pub type DbPool = AnyPool;
 
@@ -13,12 +13,26 @@ pub enum Error {
 /// Create a connection pool for the given DATABASE_URL.
 ///
 /// Supported schemes: `sqlite:` and `postgres:` / `postgresql:`.
-/// For SQLite, callers should issue `PRAGMA foreign_keys = ON` per
-/// connection to enforce FK constraints at the storage layer
-/// (SQLite does not enable this by default).
+/// For SQLite connections, `PRAGMA foreign_keys = ON` is automatically
+/// executed on every new connection so FK constraints are enforced at
+/// the storage layer (SQLite disables this by default).
 pub async fn connect(database_url: &str) -> Result<DbPool, Error> {
     sqlx::any::install_default_drivers();
-    Ok(AnyPool::connect(database_url).await?)
+    if database_url.starts_with("sqlite:") {
+        Ok(PoolOptions::<Any>::new()
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    sqlx::query("PRAGMA foreign_keys = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(database_url)
+            .await?)
+    } else {
+        Ok(AnyPool::connect(database_url).await?)
+    }
 }
 
 /// Run all pending migrations against the pool.

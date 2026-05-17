@@ -118,10 +118,11 @@ impl ProviderAdapter for Route53Adapter {
         let client = self.sdk_client(creds)?;
         let mut zones = Vec::new();
 
-        // list_hosted_zones supports the paginator interface.
+        // PaginationStream::next() is an inherent async method on aws-smithy-async's
+        // PaginationStream<Item>; it does not require a StreamExt import.
         let mut paginator = client.list_hosted_zones().into_paginator().send();
         while let Some(page) = paginator.next().await {
-            let page = page.map_err(|e| map_sdk_error(e))?;
+            let page = page.map_err(map_sdk_error)?;
             for hz in page.hosted_zones() {
                 zones.push(ProviderZone {
                     provider_zone_id: normalize_zone_id(hz.id()),

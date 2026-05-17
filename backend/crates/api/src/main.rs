@@ -114,6 +114,27 @@ fn build_cors() -> CorsLayer {
     }
 }
 
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Return only the scheme and host of a database URL, stripping any embedded
+/// credentials so the string is safe to write to logs.
+///
+/// Examples:
+/// - `postgres://user:secret@host:5432/db` → `postgres://host:5432`
+/// - `sqlite:dns_manager.db`               → `sqlite:dns_manager.db`
+fn redact_database_url(url: &str) -> String {
+    if let Some(scheme_sep) = url.find("://") {
+        let after_scheme = &url[scheme_sep + 3..];
+        if let Some(at_pos) = after_scheme.find('@') {
+            let host_and_rest = &after_scheme[at_pos + 1..];
+            let host = host_and_rest.split('/').next().unwrap_or(host_and_rest);
+            let scheme = &url[..scheme_sep];
+            return format!("{}://{}", scheme, host);
+        }
+    }
+    url.to_string()
+}
+
 // ── startup ───────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -130,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:dns_manager.db".to_string());
 
-    tracing::info!(%database_url, "connecting to database");
+    tracing::info!(database_url = %redact_database_url(&database_url), "connecting to database");
     let pool = dns_manager_db::connect(&database_url).await?;
 
     tracing::info!("running migrations");

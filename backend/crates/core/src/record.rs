@@ -37,16 +37,35 @@ impl ProviderRecord {
     pub fn normalize_for_comparison(&self) -> Vec<String> {
         match self.record_type {
             RecordType::Mx => {
-                let mut parsed: Vec<(u16, String)> = self
-                    .values
-                    .iter()
-                    .filter_map(|v| parse_mx(v.trim()))
-                    .collect();
+                // Separate parseable from unparseable values.
+                // Unparseable values are kept as opaque strings rather than
+                // silently dropped, so a misconfigured record is not hidden
+                // from the diff engine.
+                let mut parsed: Vec<(u16, String)> = Vec::new();
+                let mut opaque: Vec<String> = Vec::new();
+                for v in &self.values {
+                    let trimmed = v.trim();
+                    match parse_mx(trimmed) {
+                        Some(entry) => parsed.push(entry),
+                        None => opaque.push(trimmed.to_string()),
+                    }
+                }
                 parsed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-                parsed
+                opaque.sort();
+                let mut result: Vec<String> = parsed
                     .into_iter()
                     .map(|(priority, exchange)| format!("{priority} {exchange}"))
-                    .collect()
+                    .collect();
+                result.extend(opaque);
+                result
+            }
+            RecordType::Txt => {
+                // TXT values are case-sensitive opaque strings; only trim
+                // whitespace, never lowercase.
+                let mut normalized: Vec<String> =
+                    self.values.iter().map(|v| v.trim().to_string()).collect();
+                normalized.sort();
+                normalized
             }
             _ => {
                 let mut normalized: Vec<String> = self
@@ -143,7 +162,42 @@ mod tests {
         assert!(diff(&actual, &desired));
     }
 
+    // ── MX: unparseable values are retained ───────────────────────────────────
+
+    #[test]
+    fn mx_retains_unparseable_value() {
+        let r = make(RecordType::Mx, &["10 mail.example.com.", "not-an-mx-value"]);
+        let normalized = r.normalize_for_comparison();
+        assert!(
+            normalized.contains(&"not-an-mx-value".to_string()),
+            "unparseable MX value must not be silently dropped; got: {normalized:?}",
+        );
+    }
+
+    #[test]
+    fn mx_opaque_value_causes_diff() {
+        let with_opaque = make(RecordType::Mx, &["10 mail.example.com.", "not-an-mx-value"]);
+        let without_opaque = make(RecordType::Mx, &["10 mail.example.com."]);
+        assert!(diff(&with_opaque, &without_opaque));
+    }
+
     // ── TXT ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn txt_preserves_uppercase() {
+        let r = make(RecordType::Txt, &["v=DKIM1; k=rsa; p=MIIBIjAN"]);
+        assert_eq!(
+            r.normalize_for_comparison(),
+            vec!["v=DKIM1; k=rsa; p=MIIBIjAN"],
+        );
+    }
+
+    #[test]
+    fn txt_case_sensitive_comparison() {
+        let actual = make(RecordType::Txt, &["v=DKIM1; p=ABCdef"]);
+        let desired = make(RecordType::Txt, &["v=DKIM1; p=abcdef"]);
+        assert!(diff(&actual, &desired));
+    }
 
     #[test]
     fn txt_order_independent() {
