@@ -141,7 +141,10 @@ mod tests {
     #[test]
     fn mx_sorts_by_priority_numerically() {
         // 辞書順では "9" > "10" になるが数値ソートで正しく並ぶことを確認
-        let r = make(RecordType::Mx, &["20 mail2.example.com.", "9 mail1.example.com."]);
+        let r = make(
+            RecordType::Mx,
+            &["20 mail2.example.com.", "9 mail1.example.com."],
+        );
         assert_eq!(
             r.normalize_for_comparison(),
             vec!["9 mail1.example.com", "20 mail2.example.com"],
@@ -203,11 +206,17 @@ mod tests {
     fn txt_order_independent() {
         let actual = make(
             RecordType::Txt,
-            &["v=spf1 include:example.com ~all", "google-site-verification=abc"],
+            &[
+                "v=spf1 include:example.com ~all",
+                "google-site-verification=abc",
+            ],
         );
         let desired = make(
             RecordType::Txt,
-            &["google-site-verification=abc", "v=spf1 include:example.com ~all"],
+            &[
+                "google-site-verification=abc",
+                "v=spf1 include:example.com ~all",
+            ],
         );
         assert!(!diff(&actual, &desired));
     }
@@ -245,7 +254,10 @@ mod tests {
             ttl: 300,
             values: vec!["192.0.2.1".to_string()],
         };
-        let desired = ProviderRecord { ttl: 600, ..actual.clone() };
+        let desired = ProviderRecord {
+            ttl: 600,
+            ..actual.clone()
+        };
         assert!(diff(&actual, &desired));
     }
 }

@@ -99,27 +99,27 @@ fn build_router(state: AppState, cors: CorsLayer) -> Router {
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 
-fn build_cors() -> CorsLayer {
+fn build_cors() -> anyhow::Result<CorsLayer> {
     // In development (no APP_ENV or APP_ENV != "production"), allow all origins.
     // In production, tighten this to the actual frontend origin.
     let env = std::env::var("APP_ENV").unwrap_or_default();
     if env == "production" {
         // Placeholder: callers must set CORS_ALLOWED_ORIGIN in production.
-        let origin = std::env::var("CORS_ALLOWED_ORIGIN")
-            .expect("CORS_ALLOWED_ORIGIN must be set when APP_ENV=production");
-        CorsLayer::new()
-            .allow_origin(
-                origin
-                    .parse::<axum::http::HeaderValue>()
-                    .expect("CORS_ALLOWED_ORIGIN is not a valid header value"),
-            )
+        let origin = std::env::var("CORS_ALLOWED_ORIGIN").map_err(|_| {
+            anyhow::anyhow!("CORS_ALLOWED_ORIGIN must be set when APP_ENV=production")
+        })?;
+        let origin = origin
+            .parse::<axum::http::HeaderValue>()
+            .map_err(|_| anyhow::anyhow!("CORS_ALLOWED_ORIGIN is not a valid header value"))?;
+        Ok(CorsLayer::new()
+            .allow_origin(origin)
             .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any))
     } else {
-        CorsLayer::new()
+        Ok(CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
-            .allow_headers(Any)
+            .allow_headers(Any))
     }
 }
 
@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(8080);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let app = build_router(state, build_cors());
+    let app = build_router(state, build_cors()?);
 
     tracing::info!(%addr, "listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -39,16 +39,15 @@ async fn update_changeset_status(
         );
     }
     let now = chrono::Utc::now().to_rfc3339();
-    let affected = sqlx::query(
-        "UPDATE changesets SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
-    )
-    .bind(status_to_db(to))
-    .bind(&now)
-    .bind(changeset_id)
-    .bind(status_to_db(from))
-    .execute(db)
-    .await?
-    .rows_affected();
+    let affected =
+        sqlx::query("UPDATE changesets SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+            .bind(status_to_db(to))
+            .bind(&now)
+            .bind(changeset_id)
+            .bind(status_to_db(from))
+            .execute(db)
+            .await?
+            .rows_affected();
 
     if affected == 0 {
         anyhow::bail!(
@@ -129,7 +128,11 @@ impl ReconcileWorker {
         adapters: HashMap<String, Arc<dyn ProviderAdapter>>,
         key_provider: Arc<dyn KeyProvider>,
     ) -> Self {
-        Self { db, adapters, key_provider }
+        Self {
+            db,
+            adapters,
+            key_provider,
+        }
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -170,7 +173,10 @@ impl ReconcileWorker {
         .await?;
 
         for row in rows {
-            if let Err(e) = self.apply_single_changeset(&row.id, &row.rollback_policy).await {
+            if let Err(e) = self
+                .apply_single_changeset(&row.id, &row.rollback_policy)
+                .await
+            {
                 tracing::error!(changeset_id = %row.id, error = %e, "apply_single_changeset returned error");
             }
         }
@@ -210,7 +216,11 @@ impl ReconcileWorker {
                     ChangeSetStatus::Applied,
                 )
                 .await?;
-                tracing::info!(changeset_id, items = applied.len(), "changeset applied successfully");
+                tracing::info!(
+                    changeset_id,
+                    items = applied.len(),
+                    "changeset applied successfully"
+                );
             }
             Err((applied, err)) => {
                 let elapsed = start.elapsed();
@@ -221,8 +231,7 @@ impl ReconcileWorker {
                     "changeset apply failed",
                 );
 
-                let auto_rollback =
-                    rollback_policy == "auto" && elapsed < Duration::from_secs(30);
+                let auto_rollback = rollback_policy == "auto" && elapsed < Duration::from_secs(30);
 
                 if !auto_rollback {
                     if let Err(e) = update_changeset_status(
@@ -344,13 +353,12 @@ impl ReconcileWorker {
         }
 
         for binding in &bindings {
-            let adapter =
-                self.adapters.get(&binding.provider_type).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no adapter registered for provider type '{}'",
-                        binding.provider_type
-                    )
-                })?;
+            let adapter = self.adapters.get(&binding.provider_type).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no adapter registered for provider type '{}'",
+                    binding.provider_type
+                )
+            })?;
             let creds =
                 self.decrypt_credentials(&binding.credentials_blob, &binding.credentials_dek)?;
 
@@ -391,7 +399,12 @@ impl ReconcileWorker {
             }
         }
 
-        Ok(AppliedItemCtx { zone_id, operation: item.operation.clone(), before_record, after_record })
+        Ok(AppliedItemCtx {
+            zone_id,
+            operation: item.operation.clone(),
+            before_record,
+            after_record,
+        })
     }
 
     async fn rollback_items(&self, applied: &[AppliedItemCtx]) -> anyhow::Result<()> {
@@ -405,17 +418,14 @@ impl ReconcileWorker {
             .await?;
 
             for binding in &bindings {
-                let adapter =
-                    self.adapters.get(&binding.provider_type).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "no adapter registered for provider type '{}' during rollback",
-                            binding.provider_type
-                        )
-                    })?;
-                let creds = self.decrypt_credentials(
-                    &binding.credentials_blob,
-                    &binding.credentials_dek,
-                )?;
+                let adapter = self.adapters.get(&binding.provider_type).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no adapter registered for provider type '{}' during rollback",
+                        binding.provider_type
+                    )
+                })?;
+                let creds =
+                    self.decrypt_credentials(&binding.credentials_blob, &binding.credentials_dek)?;
 
                 match ctx.operation.as_str() {
                     "create" => {
@@ -633,7 +643,10 @@ impl ReconcileWorker {
             .await
             .map_err(|e| anyhow::anyhow!("list_records failed: {e}"))?;
 
-        Ok(records.into_iter().map(|r| (RecordKey::from(&r), r)).collect())
+        Ok(records
+            .into_iter()
+            .map(|r| (RecordKey::from(&r), r))
+            .collect())
     }
 
     // ── retry loop ────────────────────────────────────────────────────────────
@@ -670,7 +683,10 @@ impl ReconcileWorker {
         let mut groups: HashMap<String, Vec<&SyncStateFailedRow>> = HashMap::new();
         for row in &rows {
             if should_retry(row, now) {
-                groups.entry(row.provider_binding_id.clone()).or_default().push(row);
+                groups
+                    .entry(row.provider_binding_id.clone())
+                    .or_default()
+                    .push(row);
             }
         }
 
@@ -678,7 +694,10 @@ impl ReconcileWorker {
             return Ok(());
         }
 
-        tracing::info!(bindings = groups.len(), "retry loop: retrying sync_failed bindings");
+        tracing::info!(
+            bindings = groups.len(),
+            "retry loop: retrying sync_failed bindings"
+        );
 
         for (binding_id, entries) in &groups {
             if let Err(e) = self.retry_one_binding(binding_id, entries).await {
@@ -713,8 +732,9 @@ impl ReconcileWorker {
         match self.fetch_actual_records(&binding).await {
             Ok(actual_map) => {
                 for entry in entries {
-                    if let Err(e) =
-                        self.retry_resolve_entry(entry, &binding, &actual_map, &now_str).await
+                    if let Err(e) = self
+                        .retry_resolve_entry(entry, &binding, &actual_map, &now_str)
+                        .await
                     {
                         tracing::error!(
                             record_id = %entry.record_id,

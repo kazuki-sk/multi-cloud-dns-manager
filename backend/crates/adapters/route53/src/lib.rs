@@ -4,7 +4,7 @@ mod error;
 
 use async_trait::async_trait;
 use aws_sdk_route53::{
-    types::{Change, ChangeBatch, ChangeAction, ResourceRecord, ResourceRecordSet, RrType},
+    types::{Change, ChangeAction, ChangeBatch, ResourceRecord, ResourceRecordSet, RrType},
     Client,
 };
 use dns_manager_core::{
@@ -162,9 +162,7 @@ impl ProviderAdapter for Route53Adapter {
         Ok(ProviderZoneDetail {
             provider_zone_id: normalize_zone_id(hz.id()),
             name: hz.name().trim_end_matches('.').to_string(),
-            record_count: hz
-                .resource_record_set_count()
-                .map(|n: i64| n.max(0) as u64),
+            record_count: hz.resource_record_set_count().map(|n: i64| n.max(0) as u64),
         })
     }
 
@@ -189,9 +187,7 @@ impl ProviderAdapter for Route53Adapter {
         let mut next_type: Option<RrType> = None;
 
         loop {
-            let mut builder = client
-                .list_resource_record_sets()
-                .hosted_zone_id(&zone_id);
+            let mut builder = client.list_resource_record_sets().hosted_zone_id(&zone_id);
             if let Some(ref name) = next_name {
                 builder = builder.start_record_name(name);
             }

@@ -38,7 +38,5 @@ fn is_throttle(msg: &str) -> bool {
 pub fn is_record_not_found(msg: &str) -> bool {
     // Route53 error text for DELETE of non-existent record:
     // "Tried to delete resource record set [...] but it was not found"
-    msg.contains("was not found")
-        || msg.contains("does not exist")
-        || msg.contains("not found")
+    msg.contains("was not found") || msg.contains("does not exist") || msg.contains("not found")
 }

@@ -42,7 +42,9 @@ fn status_from_db(s: &str) -> Result<ChangeSetStatus, ApiError> {
         "frozen" => Ok(ChangeSetStatus::Frozen),
         other => {
             tracing::error!(status = other, "unknown changeset status in database");
-            Err(ApiError::Internal(format!("unknown changeset status: {other}")))
+            Err(ApiError::Internal(format!(
+                "unknown changeset status: {other}"
+            )))
         }
     }
 }
@@ -119,10 +121,7 @@ fn db_err(e: sqlx::Error) -> ApiError {
 }
 
 /// Fetch a changeset row and its items by ID. Returns `None` if not found.
-async fn fetch_changeset(
-    pool: &DbPool,
-    changeset_id: &str,
-) -> Result<Option<Changeset>, ApiError> {
+async fn fetch_changeset(pool: &DbPool, changeset_id: &str) -> Result<Option<Changeset>, ApiError> {
     let Some(row) = sqlx::query_as::<_, ChangesetRow>(
         "SELECT id, created_by, description, status, rollback_policy, created_at, updated_at
          FROM changesets WHERE id = ?",
@@ -190,7 +189,9 @@ pub async fn create_changeset(
 ) -> Result<impl IntoResponse, ApiError> {
     // ── validation ────────────────────────────────────────────────────────────
     if body.items.is_empty() {
-        return Err(ApiError::UnprocessableEntity("items must not be empty".into()));
+        return Err(ApiError::UnprocessableEntity(
+            "items must not be empty".into(),
+        ));
     }
     let valid_ops = ["create", "update", "delete"];
     for item in &body.items {

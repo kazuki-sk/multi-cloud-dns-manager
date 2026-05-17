@@ -40,10 +40,20 @@ fn record_type_str(rt: RecordType) -> &'static str {
 fn compute_desired_hash(name: &str, record_type: &str, ttl: i64, values: &[String]) -> String {
     let mut sorted = values.to_vec();
     sorted.sort();
-    let values_json =
-        serde_json::to_string(&sorted).expect("Vec<String> serialization is infallible");
-    let input = format!("{name}|{record_type}|{ttl}|{values_json}");
-    let bytes = Sha256::digest(input.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    hasher.update(b"|");
+    hasher.update(record_type.as_bytes());
+    hasher.update(b"|");
+    hasher.update(ttl.to_string().as_bytes());
+    hasher.update(b"|");
+    for value in sorted {
+        hasher.update(value.len().to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(value.as_bytes());
+        hasher.update(b"|");
+    }
+    let bytes = hasher.finalize();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -147,9 +157,7 @@ pub struct CreateRecordRequest {
 // ── zone handlers ─────────────────────────────────────────────────────────────
 
 /// GET /api/v1/zones — return all zones ordered by name.
-pub async fn list_zones(
-    State(pool): State<Arc<DbPool>>,
-) -> Result<impl IntoResponse, ApiError> {
+pub async fn list_zones(State(pool): State<Arc<DbPool>>) -> Result<impl IntoResponse, ApiError> {
     let rows = sqlx::query_as::<_, ZoneRow>(
         "SELECT id, name, default_ttl, owner_team_id, created_at, updated_at
          FROM zones
@@ -180,7 +188,9 @@ pub async fn create_zone(
     Json(body): Json<CreateZoneRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.name.trim().is_empty() {
-        return Err(ApiError::UnprocessableEntity("name must not be empty".into()));
+        return Err(ApiError::UnprocessableEntity(
+            "name must not be empty".into(),
+        ));
     }
     if body.name.len() > 255 {
         return Err(ApiError::UnprocessableEntity(
@@ -279,15 +289,17 @@ pub async fn create_record(
 ) -> Result<impl IntoResponse, ApiError> {
     // ── validation ────────────────────────────────────────────────────────────
     if body.ttl <= 0 {
-        return Err(ApiError::BadRequest(
-            "ttl must be greater than 0".into(),
-        ));
+        return Err(ApiError::BadRequest("ttl must be greater than 0".into()));
     }
     if body.name.trim().is_empty() {
-        return Err(ApiError::UnprocessableEntity("name must not be empty".into()));
+        return Err(ApiError::UnprocessableEntity(
+            "name must not be empty".into(),
+        ));
     }
     if body.values.is_empty() {
-        return Err(ApiError::UnprocessableEntity("values must not be empty".into()));
+        return Err(ApiError::UnprocessableEntity(
+            "values must not be empty".into(),
+        ));
     }
 
     // ── zone existence check ──────────────────────────────────────────────────
