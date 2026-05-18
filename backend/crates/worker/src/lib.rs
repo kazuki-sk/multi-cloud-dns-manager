@@ -737,17 +737,23 @@ impl ReconcileWorker {
     ) -> anyhow::Result<()> {
         let now_str = chrono::Utc::now().to_rfc3339();
 
-        let binding: ProviderBindingRow = sqlx::query_as(
+        let binding = sqlx::query_as::<_, ProviderBindingRow>(
             "SELECT pb.id, p.provider_type, pb.provider_zone_id,
                     p.credentials_blob, p.credentials_dek
              FROM provider_bindings pb
              JOIN providers p ON pb.provider_id = p.id
-             WHERE pb.id = ?",
+             WHERE pb.id = ? AND pb.status = 'active' AND p.status = 'active'",
         )
         .bind(binding_id)
         .fetch_optional(&*self.db)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("provider_binding '{binding_id}' not found"))?;
+        .await?;
+        let Some(binding) = binding else {
+            tracing::info!(
+                provider_binding_id = %binding_id,
+                "retry loop: skipping inactive or missing binding",
+            );
+            return Ok(());
+        };
 
         match self.fetch_actual_records(&binding).await {
             Ok(actual_map) => {
@@ -959,4 +965,81 @@ async fn upsert_sync_state(
     .execute(db)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dns_manager_core::EnvKeyProvider;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    async fn make_pool() -> Arc<DbPool> {
+        let opts = SqliteConnectOptions::new()
+            .filename(":memory:")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        dns_manager_db::migrate(&pool).await.unwrap();
+        Arc::new(pool)
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_resets_applying_to_validated() {
+        let pool = make_pool().await;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO changesets
+                 (id, created_by, description, status, rollback_policy, created_at, updated_at)
+             VALUES (?, ?, NULL, ?, 'auto', ?, ?)",
+        )
+        .bind("cs-applying")
+        .bind("tester")
+        .bind("applying")
+        .bind(&now)
+        .bind(&now)
+        .execute(&*pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO changesets
+                 (id, created_by, description, status, rollback_policy, created_at, updated_at)
+             VALUES (?, ?, NULL, ?, 'auto', ?, ?)",
+        )
+        .bind("cs-validated")
+        .bind("tester")
+        .bind("validated")
+        .bind(&now)
+        .bind(&now)
+        .execute(&*pool)
+        .await
+        .unwrap();
+
+        let worker = ReconcileWorker::new(
+            Arc::clone(&pool),
+            HashMap::new(),
+            Arc::new(EnvKeyProvider),
+        );
+        worker.startup_recovery().await.unwrap();
+
+        let applying_status: String =
+            sqlx::query_scalar("SELECT status FROM changesets WHERE id = ?")
+                .bind("cs-applying")
+                .fetch_one(&*pool)
+                .await
+                .unwrap();
+        assert_eq!(applying_status, "validated");
+
+        let validated_status: String =
+            sqlx::query_scalar("SELECT status FROM changesets WHERE id = ?")
+                .bind("cs-validated")
+                .fetch_one(&*pool)
+                .await
+                .unwrap();
+        assert_eq!(validated_status, "validated");
+    }
 }

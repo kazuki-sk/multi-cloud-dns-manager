@@ -2,7 +2,7 @@ mod error;
 mod routes;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::Arc,
 };
@@ -29,6 +29,7 @@ use routes::{changesets, health, providers, zones};
 pub struct AppState {
     pub db: Arc<DbPool>,
     pub key_provider: Arc<dyn KeyProvider>,
+    pub supported_provider_types: HashSet<String>,
 }
 
 impl FromRef<AppState> for Arc<DbPool> {
@@ -40,6 +41,12 @@ impl FromRef<AppState> for Arc<DbPool> {
 impl FromRef<AppState> for Arc<dyn KeyProvider> {
     fn from_ref(state: &AppState) -> Self {
         Arc::clone(&state.key_provider)
+    }
+}
+
+impl FromRef<AppState> for HashSet<String> {
+    fn from_ref(state: &AppState) -> Self {
+        state.supported_provider_types.clone()
     }
 }
 
@@ -199,10 +206,12 @@ async fn main() -> anyhow::Result<()> {
     let key_provider: Arc<dyn KeyProvider> = Arc::new(EnvKeyProvider);
 
     let adapters = build_adapter_registry();
+    let supported_provider_types: HashSet<String> = adapters.keys().cloned().collect();
 
     let state = AppState {
         db: Arc::new(pool),
         key_provider,
+        supported_provider_types,
     };
 
     // ── reconcile worker ─────────────────────────────────────────────────────

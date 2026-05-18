@@ -722,7 +722,7 @@ pub async fn push_pending_records(
 
         // Use last observed DNS value as before_value when available (best snapshot
         // for rollback). Fall back to the desired record's own data.
-        let before_value: Option<String> = sqlx::query_scalar(
+        let observed_before: Option<String> = sqlx::query_scalar(
             "SELECT last_observed_value FROM sync_states
              WHERE record_id = ? AND last_observed_value IS NOT NULL
              ORDER BY updated_at DESC LIMIT 1",
@@ -731,8 +731,14 @@ pub async fn push_pending_records(
         .fetch_optional(&mut *tx)
         .await
         .map_err(db_err)?
-        .flatten()
-        .or_else(|| serde_json::to_string(&record_as_provider).ok());
+        .flatten();
+        let before_value: Option<String> = if let Some(observed) = observed_before {
+            Some(observed)
+        } else {
+            Some(serde_json::to_string(&record_as_provider).map_err(|e| {
+                ApiError::Internal(format!("before_value serialization failed: {e}"))
+            })?)
+        };
 
         sqlx::query(
             "INSERT INTO changeset_items

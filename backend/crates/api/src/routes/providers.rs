@@ -9,10 +9,9 @@ use dns_manager_core::{encrypt, KeyProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
-
-const VALID_PROVIDER_TYPES: &[&str] = &["route53", "azuredns", "gcloud"];
 
 use crate::error::ApiError;
 use dns_manager_db::DbPool;
@@ -127,6 +126,7 @@ pub struct UpdateProviderRequest {
 pub async fn create_provider(
     State(pool): State<Arc<DbPool>>,
     State(key_provider): State<Arc<dyn KeyProvider>>,
+    State(supported_provider_types): State<HashSet<String>>,
     Json(body): Json<CreateProviderRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // ── validation ────────────────────────────────────────────────────────────
@@ -135,10 +135,13 @@ pub async fn create_provider(
             "name must not be empty".into(),
         ));
     }
-    if !VALID_PROVIDER_TYPES.contains(&body.provider_type.as_str()) {
+    if !supported_provider_types.contains(&body.provider_type) {
+        let mut valid_types: Vec<&str> =
+            supported_provider_types.iter().map(String::as_str).collect();
+        valid_types.sort_unstable();
         return Err(ApiError::BadRequest(format!(
             "unknown provider_type '{}': must be one of {:?}",
-            body.provider_type, VALID_PROVIDER_TYPES,
+            body.provider_type, valid_types,
         )));
     }
 
@@ -265,7 +268,7 @@ pub async fn list_provider_bindings(
     Ok(Json(ListProviderBindingsResponse { bindings }))
 }
 
-/// GET /api/v1/providers/{provider_id}/sync-state — list sync states for a provider binding.
+/// GET /api/v1/providers/{provider_id}/sync-state — list sync states for a provider.
 ///
 /// Returns 404 if the provider_id does not exist.
 pub async fn get_sync_state(
@@ -273,23 +276,23 @@ pub async fn get_sync_state(
     Path(provider_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     // ── provider existence check ──────────────────────────────────────────────
-    let binding_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM provider_bindings WHERE id = ?")
-            .bind(&provider_id)
-            .fetch_one(&*pool)
-            .await
-            .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+    let provider_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM providers WHERE id = ?")
+        .bind(&provider_id)
+        .fetch_one(&*pool)
+        .await
+        .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
 
-    if binding_count == 0 {
+    if provider_count == 0 {
         return Err(ApiError::NotFound);
     }
 
     // ── fetch sync states ─────────────────────────────────────────────────────
     let rows = sqlx::query_as::<_, SyncStateRow>(
-        "SELECT record_id, provider_binding_id, last_observed_value, last_observed_at,
-                status, last_error, retry_count, created_at, updated_at
-         FROM sync_states
-         WHERE provider_binding_id = ?
+        "SELECT ss.record_id, ss.provider_binding_id, ss.last_observed_value, ss.last_observed_at,
+                ss.status, ss.last_error, ss.retry_count, ss.created_at, ss.updated_at
+         FROM sync_states ss
+         JOIN provider_bindings pb ON ss.provider_binding_id = pb.id
+         WHERE pb.provider_id = ?
          ORDER BY record_id",
     )
     .bind(&provider_id)
@@ -449,7 +452,7 @@ mod tests {
         body::Body,
         extract::FromRef,
         http::{Request, StatusCode},
-        routing::post,
+        routing::{get, post},
         Router,
     };
     use dns_manager_core::EnvKeyProvider;
@@ -460,6 +463,7 @@ mod tests {
     struct TestState {
         pool: Arc<DbPool>,
         key_provider: Arc<dyn KeyProvider>,
+        supported_provider_types: HashSet<String>,
     }
 
     impl FromRef<TestState> for Arc<DbPool> {
@@ -471,6 +475,12 @@ mod tests {
     impl FromRef<TestState> for Arc<dyn KeyProvider> {
         fn from_ref(s: &TestState) -> Self {
             Arc::clone(&s.key_provider)
+        }
+    }
+
+    impl FromRef<TestState> for HashSet<String> {
+        fn from_ref(s: &TestState) -> Self {
+            s.supported_provider_types.clone()
         }
     }
 
@@ -488,12 +498,17 @@ mod tests {
         TestState {
             pool: Arc::new(pool),
             key_provider: Arc::new(EnvKeyProvider),
+            supported_provider_types: ["route53"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 
     fn make_router(state: TestState) -> Router {
         Router::new()
             .route("/providers", post(create_provider))
+            .route("/providers/{provider_id}/sync-state", get(get_sync_state))
             .with_state(state)
     }
 
@@ -516,5 +531,156 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_sync_state_scopes_by_provider_id() {
+        let state = make_state().await;
+        let pool = Arc::clone(&state.pool);
+        let app = make_router(state);
+
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO zones (id, name, default_ttl, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+            .bind("z1")
+            .bind("example.com")
+            .bind(300_i64)
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO desired_records (id, zone_id, name, record_type, record_values, ttl, desired_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind("r1")
+            .bind("z1")
+            .bind("www")
+            .bind("A")
+            .bind("[\"1.1.1.1\"]")
+            .bind(300_i64)
+            .bind("h1")
+            .bind("synced")
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO desired_records (id, zone_id, name, record_type, record_values, ttl, desired_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind("r2")
+            .bind("z1")
+            .bind("api")
+            .bind("A")
+            .bind("[\"2.2.2.2\"]")
+            .bind(300_i64)
+            .bind("h2")
+            .bind("synced")
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO providers (id, name, provider_type, credentials_blob, credentials_dek, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind("p1")
+            .bind("primary")
+            .bind("route53")
+            .bind("blob")
+            .bind("dek")
+            .bind("active")
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO providers (id, name, provider_type, credentials_blob, credentials_dek, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind("p2")
+            .bind("secondary")
+            .bind("route53")
+            .bind("blob")
+            .bind("dek")
+            .bind("active")
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO provider_bindings (id, zone_id, provider_id, provider_zone_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind("b1")
+            .bind("z1")
+            .bind("p1")
+            .bind("Z-P1")
+            .bind("active")
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO provider_bindings (id, zone_id, provider_id, provider_zone_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind("b2")
+            .bind("z1")
+            .bind("p2")
+            .bind("Z-P2")
+            .bind("active")
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO sync_states (record_id, provider_binding_id, last_observed_value, last_observed_at, status, last_error, retry_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind("r1")
+            .bind("b1")
+            .bind("{\"name\":\"www\"}")
+            .bind(&now)
+            .bind("in_sync")
+            .bind(Option::<String>::None)
+            .bind(0_i64)
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        sqlx::query("INSERT INTO sync_states (record_id, provider_binding_id, last_observed_value, last_observed_at, status, last_error, retry_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind("r2")
+            .bind("b2")
+            .bind("{\"name\":\"api\"}")
+            .bind(&now)
+            .bind("drift")
+            .bind(Option::<String>::None)
+            .bind(0_i64)
+            .bind(&now)
+            .bind(&now)
+            .execute(&*pool)
+            .await
+            .unwrap();
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/providers/p1/sync-state")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let states = json
+            .get("sync_states")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0]["provider_binding_id"], "b1");
     }
 }
