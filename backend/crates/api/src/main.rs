@@ -29,7 +29,7 @@ use routes::{changesets, health, providers, zones};
 pub struct AppState {
     pub db: Arc<DbPool>,
     pub key_provider: Arc<dyn KeyProvider>,
-    pub registered_providers: HashSet<String>,
+    pub supported_provider_types: HashSet<String>,
 }
 
 impl FromRef<AppState> for Arc<DbPool> {
@@ -46,7 +46,7 @@ impl FromRef<AppState> for Arc<dyn KeyProvider> {
 
 impl FromRef<AppState> for HashSet<String> {
     fn from_ref(state: &AppState) -> Self {
-        state.registered_providers.clone()
+        state.supported_provider_types.clone()
     }
 }
 
@@ -73,7 +73,17 @@ fn build_router(state: AppState, cors: CorsLayer) -> Router {
         .route(
             "/{zone_id}/records/{record_id}",
             patch(zones::update_record).delete(zones::delete_record),
-        );
+        )
+        .route(
+            "/{zone_id}/bindings",
+            get(zones::list_bindings).post(zones::create_binding),
+        )
+        .route(
+            "/{zone_id}/bindings/{binding_id}",
+            axum::routing::delete(zones::delete_binding),
+        )
+        .route("/{zone_id}/sync-states", get(zones::list_zone_sync_states))
+        .route("/{zone_id}/push", post(zones::push_pending_records));
 
     let changesets_routes = Router::new()
         .route(
@@ -101,6 +111,10 @@ fn build_router(state: AppState, cors: CorsLayer) -> Router {
             get(providers::get_provider)
                 .patch(providers::update_provider)
                 .delete(providers::delete_provider),
+        )
+        .route(
+            "/{provider_id}/bindings",
+            get(providers::list_provider_bindings),
         )
         .route("/{provider_id}/sync-state", get(providers::get_sync_state));
 
@@ -192,12 +206,12 @@ async fn main() -> anyhow::Result<()> {
     let key_provider: Arc<dyn KeyProvider> = Arc::new(EnvKeyProvider);
 
     let adapters = build_adapter_registry();
-    let registered_providers: HashSet<String> = adapters.keys().cloned().collect();
+    let supported_provider_types: HashSet<String> = adapters.keys().cloned().collect();
 
     let state = AppState {
         db: Arc::new(pool),
         key_provider,
-        registered_providers,
+        supported_provider_types,
     };
 
     // ── reconcile worker ─────────────────────────────────────────────────────
