@@ -9,9 +9,10 @@ use dns_manager_core::{encrypt, KeyProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
-use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
+
+const VALID_PROVIDER_TYPES: &[&str] = &["route53", "azuredns", "gcloud"];
 
 use crate::error::ApiError;
 use dns_manager_db::DbPool;
@@ -19,10 +20,20 @@ use dns_manager_db::DbPool;
 // ── DB row types ──────────────────────────────────────────────────────────────
 
 #[derive(FromRow)]
-struct ProviderBindingRow {
+struct ProviderRow {
+    id: String,
+    name: String,
+    provider_type: String,
+    status: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(FromRow)]
+struct ProviderZoneBindingRow {
     id: String,
     zone_id: String,
-    provider_type: String,
+    zone_name: String,
     provider_zone_id: String,
     status: String,
     created_at: String,
@@ -45,14 +56,34 @@ struct SyncStateRow {
 // ── response types ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct ProviderBinding {
+struct Provider {
+    id: String,
+    name: String,
+    provider_type: String,
+    status: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+struct ListProvidersResponse {
+    providers: Vec<Provider>,
+}
+
+#[derive(Serialize)]
+struct ProviderZoneBinding {
     id: String,
     zone_id: String,
-    provider_type: String,
+    zone_name: String,
     provider_zone_id: String,
     status: String,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Serialize)]
+struct ListProviderBindingsResponse {
+    bindings: Vec<ProviderZoneBinding>,
 }
 
 #[derive(Serialize)]
@@ -77,57 +108,38 @@ struct SyncStateListResponse {
 
 #[derive(Deserialize)]
 pub struct CreateProviderRequest {
-    zone_id: String,
+    name: String,
     provider_type: String,
-    provider_zone_id: String,
     credentials: JsonValue,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateProviderRequest {
+    name: Option<String>,
+    status: Option<String>,
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
 
-/// POST /api/v1/providers — create a provider binding with envelope-encrypted credentials.
+/// POST /api/v1/providers — create a cloud provider account with envelope-encrypted credentials.
 ///
-/// Returns 404 if zone_id does not exist.
-/// Returns 201 with the created binding; credentials fields are never included in the response.
+/// Returns 201 with the created provider; credentials fields are never included in the response.
 pub async fn create_provider(
     State(pool): State<Arc<DbPool>>,
     State(key_provider): State<Arc<dyn KeyProvider>>,
-    State(registered_providers): State<HashSet<String>>,
     Json(body): Json<CreateProviderRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     // ── validation ────────────────────────────────────────────────────────────
-    if body.provider_type.trim().is_empty() {
+    if body.name.trim().is_empty() {
         return Err(ApiError::UnprocessableEntity(
-            "provider_type must not be empty".into(),
+            "name must not be empty".into(),
         ));
     }
-    if !registered_providers.contains(&body.provider_type) {
+    if !VALID_PROVIDER_TYPES.contains(&body.provider_type.as_str()) {
         return Err(ApiError::BadRequest(format!(
             "unknown provider_type '{}': must be one of {:?}",
-            body.provider_type,
-            {
-                let mut sorted: Vec<&str> =
-                    registered_providers.iter().map(String::as_str).collect();
-                sorted.sort_unstable();
-                sorted
-            }
+            body.provider_type, VALID_PROVIDER_TYPES,
         )));
-    }
-    if body.provider_zone_id.trim().is_empty() {
-        return Err(ApiError::UnprocessableEntity(
-            "provider_zone_id must not be empty".into(),
-        ));
-    }
-
-    // ── zone existence check ──────────────────────────────────────────────────
-    let zone_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM zones WHERE id = ?")
-        .bind(&body.zone_id)
-        .fetch_one(&*pool)
-        .await
-        .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
-
-    if zone_count == 0 {
-        return Err(ApiError::NotFound);
     }
 
     // ── encrypt credentials (envelope encryption) ─────────────────────────────
@@ -140,15 +152,13 @@ pub async fn create_provider(
     let now = Utc::now().to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO provider_bindings
-             (id, zone_id, provider_type, provider_zone_id, credentials_blob, credentials_dek,
-              created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO providers
+             (id, name, provider_type, credentials_blob, credentials_dek, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
-    .bind(&body.zone_id)
+    .bind(&body.name)
     .bind(&body.provider_type)
-    .bind(&body.provider_zone_id)
     .bind(&encrypted.blob)
     .bind(&encrypted.dek)
     .bind(&now)
@@ -158,9 +168,9 @@ pub async fn create_provider(
     .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
 
     // ── fetch created row (credentials columns excluded) ──────────────────────
-    let row = sqlx::query_as::<_, ProviderBindingRow>(
-        "SELECT id, zone_id, provider_type, provider_zone_id, status, created_at, updated_at
-         FROM provider_bindings
+    let row = sqlx::query_as::<_, ProviderRow>(
+        "SELECT id, name, provider_type, status, created_at, updated_at
+         FROM providers
          WHERE id = ?",
     )
     .bind(&id)
@@ -170,16 +180,89 @@ pub async fn create_provider(
 
     Ok((
         StatusCode::CREATED,
-        Json(ProviderBinding {
+        Json(Provider {
             id: row.id,
-            zone_id: row.zone_id,
+            name: row.name,
             provider_type: row.provider_type,
-            provider_zone_id: row.provider_zone_id,
             status: row.status,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }),
     ))
+}
+
+/// GET /api/v1/providers — list all providers (credentials excluded).
+pub async fn list_providers(
+    State(pool): State<Arc<DbPool>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let rows = sqlx::query_as::<_, ProviderRow>(
+        "SELECT id, name, provider_type, status, created_at, updated_at
+         FROM providers
+         ORDER BY created_at",
+    )
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+
+    let providers = rows
+        .into_iter()
+        .map(|r| Provider {
+            id: r.id,
+            name: r.name,
+            provider_type: r.provider_type,
+            status: r.status,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        })
+        .collect();
+
+    Ok(Json(ListProvidersResponse { providers }))
+}
+
+/// GET /api/v1/providers/{provider_id}/bindings — list zone bindings for a provider.
+///
+/// Returns 404 if the provider_id does not exist.
+pub async fn list_provider_bindings(
+    State(pool): State<Arc<DbPool>>,
+    Path(provider_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM providers WHERE id = ?")
+        .bind(&provider_id)
+        .fetch_one(&*pool)
+        .await
+        .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+
+    if count == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    let rows = sqlx::query_as::<_, ProviderZoneBindingRow>(
+        "SELECT pb.id, pb.zone_id, z.name AS zone_name, pb.provider_zone_id,
+                pb.status, pb.created_at, pb.updated_at
+         FROM provider_bindings pb
+         JOIN zones z ON pb.zone_id = z.id
+         WHERE pb.provider_id = ?
+         ORDER BY pb.created_at",
+    )
+    .bind(&provider_id)
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+
+    let bindings = rows
+        .into_iter()
+        .map(|r| ProviderZoneBinding {
+            id: r.id,
+            zone_id: r.zone_id,
+            zone_name: r.zone_name,
+            provider_zone_id: r.provider_zone_id,
+            status: r.status,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        })
+        .collect();
+
+    Ok(Json(ListProviderBindingsResponse { bindings }))
 }
 
 /// GET /api/v1/providers/{provider_id}/sync-state — list sync states for a provider binding.
@@ -232,6 +315,133 @@ pub async fn get_sync_state(
     Ok(Json(SyncStateListResponse { sync_states }))
 }
 
+/// GET /api/v1/providers/{provider_id} — fetch a single provider.
+pub async fn get_provider(
+    State(pool): State<Arc<DbPool>>,
+    Path(provider_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row = sqlx::query_as::<_, ProviderRow>(
+        "SELECT id, name, provider_type, status, created_at, updated_at
+         FROM providers WHERE id = ?",
+    )
+    .bind(&provider_id)
+    .fetch_optional(&*pool)
+    .await
+    .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?
+    .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(Provider {
+        id: row.id,
+        name: row.name,
+        provider_type: row.provider_type,
+        status: row.status,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }))
+}
+
+/// PATCH /api/v1/providers/{provider_id} — update name and/or status.
+pub async fn update_provider(
+    State(pool): State<Arc<DbPool>>,
+    Path(provider_id): Path<String>,
+    Json(body): Json<UpdateProviderRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    if body.name.is_none() && body.status.is_none() {
+        return Err(ApiError::UnprocessableEntity(
+            "at least one of name or status must be provided".into(),
+        ));
+    }
+    if let Some(ref name) = body.name {
+        if name.trim().is_empty() {
+            return Err(ApiError::UnprocessableEntity(
+                "name must not be empty".into(),
+            ));
+        }
+    }
+    const VALID_STATUSES: &[&str] = &["active", "paused", "error"];
+    if let Some(ref status) = body.status {
+        if !VALID_STATUSES.contains(&status.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "unknown status '{}': must be one of {:?}",
+                status, VALID_STATUSES,
+            )));
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        "UPDATE providers
+         SET name       = COALESCE(?, name),
+             status     = COALESCE(?, status),
+             updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(body.name.as_deref())
+    .bind(body.status.as_deref())
+    .bind(&now)
+    .bind(&provider_id)
+    .execute(&*pool)
+    .await
+    .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    let row = sqlx::query_as::<_, ProviderRow>(
+        "SELECT id, name, provider_type, status, created_at, updated_at
+         FROM providers WHERE id = ?",
+    )
+    .bind(&provider_id)
+    .fetch_one(&*pool)
+    .await
+    .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+
+    Ok(Json(Provider {
+        id: row.id,
+        name: row.name,
+        provider_type: row.provider_type,
+        status: row.status,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }))
+}
+
+/// DELETE /api/v1/providers/{provider_id} — delete a provider.
+///
+/// Returns 409 if zone bindings still reference this provider.
+pub async fn delete_provider(
+    State(pool): State<Arc<DbPool>>,
+    Path(provider_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM providers WHERE id = ?")
+        .bind(&provider_id)
+        .fetch_one(&*pool)
+        .await
+        .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+    if count == 0 {
+        return Err(ApiError::NotFound);
+    }
+
+    let binding_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM provider_bindings WHERE provider_id = ?")
+            .bind(&provider_id)
+            .fetch_one(&*pool)
+            .await
+            .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+    if binding_count > 0 {
+        return Err(ApiError::Conflict);
+    }
+
+    sqlx::query("DELETE FROM providers WHERE id = ?")
+        .bind(&provider_id)
+        .execute(&*pool)
+        .await
+        .map_err(|e| ApiError::from(dns_manager_db::Error::Database(e)))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,7 +460,6 @@ mod tests {
     struct TestState {
         pool: Arc<DbPool>,
         key_provider: Arc<dyn KeyProvider>,
-        registered_providers: HashSet<String>,
     }
 
     impl FromRef<TestState> for Arc<DbPool> {
@@ -262,12 +471,6 @@ mod tests {
     impl FromRef<TestState> for Arc<dyn KeyProvider> {
         fn from_ref(s: &TestState) -> Self {
             Arc::clone(&s.key_provider)
-        }
-    }
-
-    impl FromRef<TestState> for HashSet<String> {
-        fn from_ref(s: &TestState) -> Self {
-            s.registered_providers.clone()
         }
     }
 
@@ -285,10 +488,6 @@ mod tests {
         TestState {
             pool: Arc::new(pool),
             key_provider: Arc::new(EnvKeyProvider),
-            registered_providers: ["route53", "azuredns", "gcloud"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
         }
     }
 
@@ -310,49 +509,12 @@ mod tests {
             .uri("/providers")
             .header("content-type", "application/json")
             .body(json_body(serde_json::json!({
-                "zone_id": "z1",
+                "name": "my-provider",
                 "provider_type": "unknown",
-                "provider_zone_id": "Z123",
                 "credentials": {}
             })))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
-
-    #[tokio::test]
-    async fn nonexistent_zone_id_returns_404() {
-        let app = make_router(make_state().await);
-        let req = Request::builder()
-            .method("POST")
-            .uri("/providers")
-            .header("content-type", "application/json")
-            .body(json_body(serde_json::json!({
-                "zone_id": "does-not-exist",
-                "provider_type": "route53",
-                "provider_zone_id": "Z123",
-                "credentials": {}
-            })))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-}
-
-// ── stub handlers (not yet implemented) ──────────────────────────────────────
-
-pub async fn list_providers() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
-}
-
-pub async fn get_provider() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
-}
-
-pub async fn update_provider() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
-}
-
-pub async fn delete_provider() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
 }

@@ -290,53 +290,11 @@ pub async fn get_changeset(
 }
 
 /// POST /api/v1/changesets/{changeset_id}/validate — transition draft → validated.
-///
-/// Uses a transaction to atomically read the current status and apply the update.
-/// Returns 400 Bad Request if the transition is not allowed by `can_transition_to`.
 pub async fn validate_changeset(
     State(pool): State<Arc<DbPool>>,
     Path(changeset_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let target = ChangeSetStatus::Validated;
-
-    let mut tx = pool.begin().await.map_err(db_err)?;
-
-    let row = sqlx::query_as::<_, ChangesetRow>(
-        "SELECT id, created_by, description, status, rollback_policy, created_at, updated_at
-         FROM changesets WHERE id = ?",
-    )
-    .bind(&changeset_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db_err)?
-    .ok_or(ApiError::NotFound)?;
-
-    let current = status_from_db(&row.status)?;
-
-    if !current.can_transition_to(target) {
-        return Err(ApiError::BadRequest(format!(
-            "cannot transition from '{}' to '{}'",
-            status_to_db(current),
-            status_to_db(target),
-        )));
-    }
-
-    let now = Utc::now().to_rfc3339();
-    sqlx::query("UPDATE changesets SET status = ?, updated_at = ? WHERE id = ?")
-        .bind(status_to_db(target))
-        .bind(&now)
-        .bind(&changeset_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db_err)?;
-
-    tx.commit().await.map_err(db_err)?;
-
-    let changeset = fetch_changeset(&pool, &changeset_id)
-        .await?
-        .ok_or_else(|| ApiError::Internal("changeset disappeared after update".into()))?;
-
-    Ok(Json(changeset))
+    transition_changeset(&pool, &changeset_id, ChangeSetStatus::Validated).await
 }
 
 #[cfg(test)]
@@ -419,16 +377,150 @@ mod tests {
     }
 }
 
-// ── stub handlers (not yet implemented) ──────────────────────────────────────
-
-pub async fn list_changesets() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
+#[derive(Serialize)]
+struct ListChangesetsResponse {
+    changesets: Vec<Changeset>,
 }
 
-pub async fn apply_changeset() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
+/// GET /api/v1/changesets — list all changesets, newest first.
+pub async fn list_changesets(
+    State(pool): State<Arc<DbPool>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let rows = sqlx::query_as::<_, ChangesetRow>(
+        "SELECT id, created_by, description, status, rollback_policy, created_at, updated_at
+         FROM changesets ORDER BY created_at DESC",
+    )
+    .fetch_all(&*pool)
+    .await
+    .map_err(db_err)?;
+
+    #[derive(sqlx::FromRow)]
+    struct ItemWithCsId {
+        changeset_id: String,
+        record_id: String,
+        operation: String,
+        before_value: Option<String>,
+        after_value: Option<String>,
+    }
+
+    let all_items: Vec<ItemWithCsId> = sqlx::query_as(
+        "SELECT changeset_id, record_id, operation, before_value, after_value
+         FROM changeset_items ORDER BY changeset_id, record_id",
+    )
+    .fetch_all(&*pool)
+    .await
+    .map_err(db_err)?;
+
+    let mut items_map: std::collections::HashMap<String, Vec<ChangesetItem>> =
+        std::collections::HashMap::new();
+    for r in all_items {
+        let before_value = r
+            .before_value
+            .as_deref()
+            .map(serde_json::from_str::<JsonValue>)
+            .transpose()
+            .map_err(|e| ApiError::Internal(format!("item before_value parse error: {e}")))?;
+        let after_value = r
+            .after_value
+            .as_deref()
+            .map(serde_json::from_str::<JsonValue>)
+            .transpose()
+            .map_err(|e| ApiError::Internal(format!("item after_value parse error: {e}")))?;
+        items_map
+            .entry(r.changeset_id)
+            .or_default()
+            .push(ChangesetItem {
+                record_id: r.record_id,
+                operation: r.operation,
+                before_value,
+                after_value,
+            });
+    }
+
+    let changesets = rows
+        .into_iter()
+        .map(|row| {
+            let items = items_map.remove(&row.id).unwrap_or_default();
+            Changeset {
+                id: row.id,
+                created_by: row.created_by,
+                description: row.description,
+                status: row.status,
+                rollback_policy: row.rollback_policy,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                items,
+            }
+        })
+        .collect();
+
+    Ok(Json(ListChangesetsResponse { changesets }))
 }
 
-pub async fn rollback_changeset() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
+/// POST /api/v1/changesets/{id}/apply — transition validated → applying.
+///
+/// The worker picks up `applying` changesets and performs the DNS changes.
+pub async fn apply_changeset(
+    State(pool): State<Arc<DbPool>>,
+    Path(changeset_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let target = ChangeSetStatus::Applying;
+    transition_changeset(&pool, &changeset_id, target).await
+}
+
+/// POST /api/v1/changesets/{id}/rollback — transition applied → rolling_back.
+///
+/// The worker picks up `rolling_back` changesets and reverts DNS changes.
+pub async fn rollback_changeset(
+    State(pool): State<Arc<DbPool>>,
+    Path(changeset_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let target = ChangeSetStatus::RollingBack;
+    transition_changeset(&pool, &changeset_id, target).await
+}
+
+/// Common helper: read current status, validate the transition, apply it.
+async fn transition_changeset(
+    pool: &DbPool,
+    changeset_id: &str,
+    target: ChangeSetStatus,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut tx = pool.begin().await.map_err(db_err)?;
+
+    let row = sqlx::query_as::<_, ChangesetRow>(
+        "SELECT id, created_by, description, status, rollback_policy, created_at, updated_at
+         FROM changesets WHERE id = ?",
+    )
+    .bind(changeset_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db_err)?
+    .ok_or(ApiError::NotFound)?;
+
+    let current = status_from_db(&row.status)?;
+
+    if !current.can_transition_to(target) {
+        return Err(ApiError::BadRequest(format!(
+            "cannot transition from '{}' to '{}'",
+            status_to_db(current),
+            status_to_db(target),
+        )));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("UPDATE changesets SET status = ?, updated_at = ? WHERE id = ?")
+        .bind(status_to_db(target))
+        .bind(&now)
+        .bind(changeset_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+    tx.commit().await.map_err(db_err)?;
+
+    let changeset = fetch_changeset(pool, changeset_id)
+        .await?
+        .ok_or_else(|| ApiError::Internal("changeset disappeared after update".into()))?;
+
+    Ok(Json(changeset))
 }

@@ -133,6 +133,12 @@ impl ReconcileWorker {
     }
 
     pub async fn run(self: Arc<Self>) {
+        // Reset changesets stuck in 'applying' from a previous crash.
+        // Safe because all adapter operations are required to be idempotent (design §5.4).
+        if let Err(e) = self.startup_recovery().await {
+            tracing::error!(error = %e, "startup recovery failed");
+        }
+
         let h1 = tokio::spawn({
             let w = Arc::clone(&self);
             async move { w.run_apply_loop().await }
@@ -146,6 +152,26 @@ impl ReconcileWorker {
             async move { w.run_retry_loop().await }
         });
         let _ = tokio::join!(h1, h2, h3);
+    }
+
+    async fn startup_recovery(&self) -> anyhow::Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let count = sqlx::query(
+            "UPDATE changesets SET status = 'validated', updated_at = ? WHERE status = 'applying'",
+        )
+        .bind(&now)
+        .execute(&*self.db)
+        .await?
+        .rows_affected();
+
+        if count > 0 {
+            tracing::warn!(
+                count,
+                "startup: reset {} stuck 'applying' changeset(s) to 'validated' for reprocessing",
+                count
+            );
+        }
+        Ok(())
     }
 
     // ── apply loop ────────────────────────────────────────────────────────────
@@ -332,8 +358,11 @@ impl ReconcileWorker {
             .map_err(|e| anyhow::anyhow!("before_value parse error: {e}"))?;
 
         let bindings: Vec<ProviderBindingRow> = sqlx::query_as(
-            "SELECT id, provider_type, provider_zone_id, credentials_blob, credentials_dek
-             FROM provider_bindings WHERE zone_id = ? AND status = 'active'",
+            "SELECT pb.id, p.provider_type, pb.provider_zone_id,
+                    p.credentials_blob, p.credentials_dek
+             FROM provider_bindings pb
+             JOIN providers p ON pb.provider_id = p.id
+             WHERE pb.zone_id = ? AND pb.status = 'active' AND p.status = 'active'",
         )
         .bind(&zone_id)
         .fetch_all(&*self.db)
@@ -397,8 +426,11 @@ impl ReconcileWorker {
     async fn rollback_items(&self, applied: &[AppliedItemCtx]) -> anyhow::Result<()> {
         for ctx in applied.iter().rev() {
             let bindings: Vec<ProviderBindingRow> = sqlx::query_as(
-                "SELECT id, provider_type, provider_zone_id, credentials_blob, credentials_dek
-                 FROM provider_bindings WHERE zone_id = ? AND status = 'active'",
+                "SELECT pb.id, p.provider_type, pb.provider_zone_id,
+                        p.credentials_blob, p.credentials_dek
+                 FROM provider_bindings pb
+                 JOIN providers p ON pb.provider_id = p.id
+                 WHERE pb.zone_id = ? AND pb.status = 'active' AND p.status = 'active'",
             )
             .bind(&ctx.zone_id)
             .fetch_all(&*self.db)
@@ -485,8 +517,11 @@ impl ReconcileWorker {
 
     async fn process_observe_batch(&self) -> anyhow::Result<()> {
         let bindings: Vec<ProviderBindingRow> = sqlx::query_as(
-            "SELECT id, provider_type, provider_zone_id, credentials_blob, credentials_dek
-             FROM provider_bindings WHERE status = 'active'",
+            "SELECT pb.id, p.provider_type, pb.provider_zone_id,
+                    p.credentials_blob, p.credentials_dek
+             FROM provider_bindings pb
+             JOIN providers p ON pb.provider_id = p.id
+             WHERE pb.status = 'active' AND p.status = 'active'",
         )
         .fetch_all(&*self.db)
         .await?;
@@ -513,7 +548,8 @@ impl ReconcileWorker {
             "SELECT id, name, record_type, record_values, ttl
              FROM desired_records
              WHERE zone_id = (SELECT zone_id FROM provider_bindings WHERE id = ?)
-               AND deleted_at IS NULL",
+               AND deleted_at IS NULL
+               AND status = 'synced'",
         )
         .bind(&binding.id)
         .fetch_all(&*self.db)
@@ -702,8 +738,11 @@ impl ReconcileWorker {
         let now_str = chrono::Utc::now().to_rfc3339();
 
         let binding: ProviderBindingRow = sqlx::query_as(
-            "SELECT id, provider_type, provider_zone_id, credentials_blob, credentials_dek
-             FROM provider_bindings WHERE id = ?",
+            "SELECT pb.id, p.provider_type, pb.provider_zone_id,
+                    p.credentials_blob, p.credentials_dek
+             FROM provider_bindings pb
+             JOIN providers p ON pb.provider_id = p.id
+             WHERE pb.id = ?",
         )
         .bind(binding_id)
         .fetch_optional(&*self.db)
